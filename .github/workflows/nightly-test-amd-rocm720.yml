@@ -1762,6 +1762,15 @@ jobs:
           # Install tabulate for run_suite.py (missing in MI35x container)
           bash scripts/ci/amd/amd_ci_exec.sh pip install tabulate
 
+      # ~1.2 TB of weights against a shared cache that nothing evicts from. Run
+      # 32196787596 died 40 minutes into the download on ENOSPC, so make room
+      # first and put the free-space numbers in the log either way.
+      - name: Ensure model cache space
+        run: |
+          bash scripts/ci/amd/amd_ci_exec.sh -w /sglang-checkout \
+            bash scripts/ci/amd/ensure_hf_cache_space.sh 1250 \
+            amd--Qwen3.8-2.4T-A95B-Quark-MXFP4
+
       # One step, not the usual accuracy/perf pair: both phases live in the
       # same suite so they launch from one server config. The 2.4T MXFP4
       # checkpoint is ~1.2 TB and is loaded once per phase, which dominates
