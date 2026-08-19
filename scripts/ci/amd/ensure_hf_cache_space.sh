@@ -6,31 +6,33 @@
 #   ensure_hf_cache_space.sh <required_gib> [keep_substring ...]
 #
 # Why this exists: /sgl-data/hf-cache is shared by every AMD job on the runner
-# and nothing evicts from it, so it fills up and the next multi-hundred-GB
-# download dies with "OSError: [Errno 28] No space left on device" partway
-# through -- after tens of minutes of transfer, and only visible by reading the
-# job log. This has been papered over twice by repointing CACHE_HOST at a fresh
-# empty directory (#26642, #26905), which frees space by abandoning the old
-# cache rather than managing it.
+# and nothing evicts whole checkpoints from it, so it fills with complete
+# models and the next multi-hundred-GB download dies with
+# "OSError: [Errno 28] No space left on device" partway through -- after tens of
+# minutes of transfer, and only visible by reading the job log. This has been
+# papered over twice by repointing CACHE_HOST at a fresh empty directory
+# (#26642, #26905), which frees space by abandoning the old cache rather than
+# managing it.
 #
-# What it does, in order:
-#   1. Always reports free space, before and after. Even when it frees nothing,
-#      the number is in the log, which is what the failure mode above lacked.
-#   2. Deletes abandoned *.incomplete blobs -- partial downloads left behind by
-#      killed jobs, which are pure waste.
-#   3. If still short, evicts whole checkpoints least-recently-used first until
-#      the target is met.
+# Stale partial downloads are already handled by
+# scripts/ci/utils/cleanup_hf_cache.py, which this delegates to rather than
+# reimplementing; that script is wired into the CUDA runner prep but nothing on
+# AMD called it before. What is genuinely new here is reporting free space and,
+# when partial-download cleanup is not enough, evicting whole checkpoints
+# least-recently-used first.
 #
 # Evicted checkpoints are re-downloaded by whichever job needs them next, so
 # this trades another job's download time for this one's ability to run at all.
 # On a cache that cannot hold every large model at once, something has to give;
-# the LRU order at least means the victim is whatever has gone longest unused.
+# LRU order at least means the victim is whatever has gone longest unused.
 #
 # Never fails the job. A wrong size estimate should not block a run that would
 # have fit, and if it truly does not fit the download reports that itself --
 # now against a log that says exactly how much room there was.
 
 set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 REQUIRED_GIB="${1:?required free space in GiB}"
 shift || true
@@ -40,7 +42,8 @@ HF_CACHE="${HF_HOME:-/sgl-data/hf-cache}/hub"
 
 # Anything touched this recently may belong to a job running right now on a
 # runner that shares this cache mount; deleting it out from under an in-flight
-# download or weight load would turn our space problem into their crash.
+# download or weight load would turn our space problem into their crash. Matches
+# the staleness window cleanup_hf_cache.py uses for partial downloads.
 PROTECT_RECENT_MINUTES=120
 
 avail_gib() {
@@ -81,16 +84,9 @@ ensure_hf_cache_space() {
     fi
 
     # Abandoned partial downloads first -- they are never useful to anyone.
-    local incomplete_count
-    incomplete_count=$(find "$HF_CACHE" -type f -name '*.incomplete' \
-        -mmin "+${PROTECT_RECENT_MINUTES}" 2>/dev/null | wc -l)
-    if (( incomplete_count > 0 )); then
-        echo "Deleting ${incomplete_count} abandoned *.incomplete blob(s)..."
-        find "$HF_CACHE" -type f -name '*.incomplete' \
-            -mmin "+${PROTECT_RECENT_MINUTES}" -delete 2>/dev/null || true
-        avail=$(avail_gib "$HF_CACHE")
-        echo "Free space now ${avail} GiB."
-    fi
+    python3 "${SCRIPT_DIR}/../utils/cleanup_hf_cache.py" || true
+    avail=$(avail_gib "$HF_CACHE")
+    echo "Free space after stale-artifact cleanup: ${avail} GiB."
 
     if (( avail >= REQUIRED_GIB )); then
         echo "✓ Reclaimed enough from partial downloads; no checkpoint evicted."
