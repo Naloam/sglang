@@ -30,6 +30,9 @@ readonly MUSA_TRITON_VERSION="3.2.0"
 # update this digest together with the pinned artifact.
 readonly MUSA_TRITON_SHA256="65b15d42fac24a2eca4c0c9f0ac68c8bd7cbe6bcc9f619c3483fb4f323391303"
 readonly MUSA_TRITON_INDEX_URL="https://dl.mthreads.com/repo/api/pypi/pypi/simple"
+readonly MUSA_TORCHADA_VERSION="0.1.82"
+readonly MUSA_TORCHADA_SHA256="472663da083ef23502f08429618a36e5e6e9b2447cf72fff2568787c815b5903"
+readonly MUSA_TORCHADA_INDEX_URL="https://pypi.org/simple"
 readonly MUSA_SETUPTOOLS_SPEC="setuptools<82"
 MUSA_CI_SCRATCH="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sglang-musa-ci.XXXXXX")"
 MUSA_CI_ISOLATED_USERBASE=""
@@ -73,6 +76,7 @@ fi
 WHL_DIR="${WHL_DIR:-/sglang-checkout/whl}"
 MUSA_TRITON_WHEEL=""
 MUSA_TRITON_TASK_LOCAL=""
+MUSA_TORCHADA_WHEEL=""
 
 wheel_sha256() {
     sha256sum "$1" | awk '{print $1}'
@@ -113,6 +117,41 @@ download_musa_triton() {
     MUSA_TRITON_WHEEL="${candidates[0]}"
 }
 
+find_bundled_torchada() {
+    local candidate
+    local -a candidates
+    if [ ! -d "$WHL_DIR" ]; then
+        return
+    fi
+    mapfile -t candidates < <(
+        compgen -G "${WHL_DIR}/torchada-${MUSA_TORCHADA_VERSION}-*.whl" || true
+    )
+    for candidate in "${candidates[@]}"; do
+        if [ "$(wheel_sha256 "$candidate")" = "$MUSA_TORCHADA_SHA256" ]; then
+            MUSA_TORCHADA_WHEEL="$candidate"
+            return
+        fi
+    done
+}
+
+download_torchada() {
+    local download_dir="${MUSA_CI_SCRATCH}/torchada"
+    local -a candidates
+    mkdir -p "$download_dir"
+    python3 -m pip --isolated download \
+        --dest "$download_dir" \
+        --index-url "$MUSA_TORCHADA_INDEX_URL" \
+        --no-deps \
+        --only-binary=:all: \
+        "torchada==${MUSA_TORCHADA_VERSION}"
+    mapfile -t candidates < <(find "$download_dir" -maxdepth 1 -type f -name '*.whl')
+    if [ "${#candidates[@]}" -ne 1 ]; then
+        echo "::error::Expected one torchada wheel, found ${#candidates[@]}"
+        exit 1
+    fi
+    MUSA_TORCHADA_WHEEL="${candidates[0]}"
+}
+
 find_bundled_musa_triton
 if [ -z "$MUSA_TRITON_WHEEL" ]; then
     if python3 "$STACK_HELPER" verify \
@@ -134,14 +173,26 @@ if [ -n "$MUSA_TRITON_WHEEL" ]; then
     echo "Using MUSA Triton wheel: ${MUSA_TRITON_WHEEL}"
 fi
 
-VENDOR_WHEELS=()
+# torchada declares an unpinned dependency on Torch. Install the exact wheel
+# with --no-deps so a fresh user site cannot resolve public CUDA Torch/Triton.
+find_bundled_torchada
+if [ -z "$MUSA_TORCHADA_WHEEL" ]; then
+    download_torchada
+fi
+if [ "$(wheel_sha256 "$MUSA_TORCHADA_WHEEL")" != "$MUSA_TORCHADA_SHA256" ]; then
+    echo "::error::torchada wheel SHA256 does not match the pinned artifact"
+    exit 1
+fi
+echo "Using torchada wheel: ${MUSA_TORCHADA_WHEEL}"
+
+VENDOR_WHEELS=("$MUSA_TORCHADA_WHEEL")
 if [ -n "$MUSA_TRITON_WHEEL" ]; then
     VENDOR_WHEELS+=("$MUSA_TRITON_WHEEL")
 fi
 if [ -d "$WHL_DIR" ] && compgen -G "${WHL_DIR}"/*.whl > /dev/null; then
     for whl in "${WHL_DIR}"/*.whl; do
         case "$(basename "$whl")" in
-          triton-*.whl) continue;;
+          triton-*.whl|torchada-*.whl) continue;;
         esac
         VENDOR_WHEELS+=("$whl")
     done
