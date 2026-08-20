@@ -141,6 +141,78 @@ jobs:
           docker tag rocm/sgl-dev:${{ env.IMAGE_TAG }} lmsysorg/sglang-rocm:${{ env.IMAGE_TAG }}
           docker push lmsysorg/sglang-rocm:${{ env.IMAGE_TAG }}
 
+  # The rocm724 flavors exist to restore torch.profiler under HIP graph replay,
+  # which ROCm 7.2.0 drops (ROCm/ROCm#6102, fixed in 7.2.2). Nothing else notices
+  # if that regresses: a trace with no GPU kernels in it still looks like a
+  # successful profile, and the profiling suite runs without CUDA graphs on ROCm
+  # (#34452), so it never exercises the replay path. Each flavor is checked on the
+  # GPU it targets, since the behaviour lives in the HIP runtime.
+  #
+  # Runs after publish rather than gating it: the images should not wait on a GPU
+  # runner queue. A red leg here means the day's rocm724 image traces nothing
+  # under graph replay and should not be recommended for profiling.
+  verify_profiling:
+    if: |
+      always() && !cancelled() && github.repository == 'sgl-project/sglang' &&
+      needs.publish.result == 'success' &&
+      (github.event_name != 'workflow_dispatch' || inputs.gpu_arch == 'all' ||
+       inputs.gpu_arch == '' || contains(inputs.gpu_arch, 'rocm724'))
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_arch: ${{ fromJson((github.event_name == 'workflow_dispatch' && contains(inputs.gpu_arch, 'rocm724')) && format('["{0}"]', inputs.gpu_arch) || '["gfx942-rocm724", "gfx950-rocm724"]') }}
+    runs-on: ${{ matrix.gpu_arch == 'gfx942-rocm724' && 'linux-mi300-1gpu-sglang' || 'linux-mi35x-gpu-1' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download image tag artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tag-${{ matrix.gpu_arch }}
+
+      - name: Read image tag
+        run: |
+          image_tag=$(tr -d '[:space:]' < "${{ matrix.gpu_arch }}.txt")
+          if [ -z "${image_tag}" ]; then
+            echo "::error::Image tag artifact is empty"
+            exit 1
+          fi
+          echo "IMAGE=rocm/sgl-dev:${image_tag}" >> $GITHUB_ENV
+          echo "Verifying rocm/sgl-dev:${image_tag}"
+
+      - name: Ensure VRAM is clear
+        run: bash scripts/ci/amd/ensure_vram_clear.sh rocm
+
+      - name: Start CI container
+        run: bash scripts/ci/amd/amd_ci_start_container.sh --custom-image "${IMAGE}"
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
+          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
+
+      # No dependency install: this checks the image's own torch and HIP runtime,
+      # which is what was just published.
+      - name: Probe HIP-graph profiling
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          docker exec -w /sglang-checkout ci_sglang \
+            python3 scripts/ci/amd/check_hip_graph_profiling.py 2>&1 | tee probe.log
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.gpu_arch }}"
+            echo "- **Image:** \`${IMAGE}\`"
+            echo ""
+            echo '```'
+            cat probe.log 2>/dev/null || echo "no probe output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Mirror the freshly published rocm/sgl-dev image to the in-network Docker
   # registry so AMD CI runners can pull without hitting Docker Hub rate limits.
   # The tag is read verbatim from the publish job's artifact so this job uses
