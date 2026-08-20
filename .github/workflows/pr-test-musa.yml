@@ -72,7 +72,7 @@ jobs:
               - "python/pyproject_other.toml"
               - "python/sglang/!(multimodal_gen)/**"
               - "python/sglang/srt/hardware_backend/musa/**"
-              - "scripts/ci/musa/*"
+              - "scripts/ci/musa/**"
               - "scripts/ci/utils/*"
             multimodal_gen:
               - "python/pyproject_other.toml"
@@ -81,9 +81,14 @@ jobs:
               - "python/sglang/multimodal_gen/test/unit/musa/layers/test_musa_silu_and_mul.py"
               - "python/sglang/multimodal_gen/test/server/musa/run_suite.py"
               - "python/sglang/multimodal_gen/test/server/musa/**"
+              - "scripts/ci/musa/**"
             sgl_kernel:
               - ".github/workflows/pr-test-musa.yml"
               - "python/sglang/kernels/aot/csrc/musa/**"
+              - "scripts/ci/musa/**"
+
+      - name: Test MUSA dependency constraints
+        run: python3 -m unittest scripts/ci/musa/test_musa_python_stack.py
 
   # ==================== PR Gate ==================== #
   pr-gate:
